@@ -1,0 +1,217 @@
+const Database = require('better-sqlite3');
+const path = require('path');
+const fs = require('fs');
+
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'health.db');
+
+// Ensure data directory exists
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+
+const db = new Database(DB_PATH);
+
+// Enable WAL mode for better concurrent read performance
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS metric_readings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    metric_name TEXT    NOT NULL,
+    units       TEXT,
+    date        TEXT    NOT NULL,
+    date_ts     INTEGER NOT NULL,
+    value_min   REAL,
+    value_avg   REAL,
+    value_max   REAL,
+    value_qty   REAL,
+    source      TEXT,
+    received_at INTEGER NOT NULL,
+    UNIQUE(metric_name, date, source)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_metric_date ON metric_readings(metric_name, date_ts);
+  CREATE INDEX IF NOT EXISTS idx_date_ts     ON metric_readings(date_ts);
+
+  CREATE TABLE IF NOT EXISTS webhook_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    received_at  INTEGER NOT NULL,
+    payload_size INTEGER,
+    metric_names TEXT,
+    reading_count INTEGER
+  );
+`);
+
+// Upsert a single reading row
+const upsertReading = db.prepare(`
+  INSERT INTO metric_readings
+    (metric_name, units, date, date_ts, value_min, value_avg, value_max, value_qty, source, received_at)
+  VALUES
+    (@metric_name, @units, @date, @date_ts, @value_min, @value_avg, @value_max, @value_qty, @source, @received_at)
+  ON CONFLICT(metric_name, date, source) DO UPDATE SET
+    value_min   = excluded.value_min,
+    value_avg   = excluded.value_avg,
+    value_max   = excluded.value_max,
+    value_qty   = excluded.value_qty,
+    units       = excluded.units,
+    received_at = excluded.received_at
+`);
+
+const logWebhook = db.prepare(`
+  INSERT INTO webhook_log (received_at, payload_size, metric_names, reading_count)
+  VALUES (@received_at, @payload_size, @metric_names, @reading_count)
+`);
+
+/**
+ * Parse a Health Auto Export date string to a Unix timestamp (seconds).
+ * Format: "2026-03-24 16:20:00 -0700"
+ */
+function parseHealthDate(dateStr) {
+  if (!dateStr) return null;
+  // JS Date handles "2026-03-24 16:20:00 -0700" if we replace space before offset
+  const normalized = dateStr.replace(/(\d{2}:\d{2}:\d{2}) ([+-]\d{4})$/, '$1$2');
+  const ts = new Date(normalized).getTime();
+  return isNaN(ts) ? null : Math.floor(ts / 1000);
+}
+
+/**
+ * Ingest a full Health Auto Export payload.
+ * Returns { metricsProcessed, readingsInserted }
+ */
+function ingestPayload(payload, rawSize) {
+  const now = Math.floor(Date.now() / 1000);
+  const metrics = payload?.data?.metrics;
+
+  if (!Array.isArray(metrics)) {
+    throw new Error('Invalid payload: expected data.metrics array');
+  }
+
+  let readingsInserted = 0;
+  const metricNames = [];
+
+  const ingestAll = db.transaction(() => {
+    for (const metric of metrics) {
+      const name = metric.name;
+      const units = metric.units || null;
+      if (!name || !Array.isArray(metric.data)) continue;
+
+      metricNames.push(name);
+
+      for (const entry of metric.data) {
+        const dateStr = entry.date || entry.startDate || null;
+        const date_ts = parseHealthDate(dateStr);
+        if (!date_ts) continue;
+
+        upsertReading.run({
+          metric_name: name,
+          units,
+          date: dateStr,
+          date_ts,
+          value_min: entry.Min ?? entry.min ?? null,
+          value_avg: entry.Avg ?? entry.avg ?? entry.value ?? null,
+          value_max: entry.Max ?? entry.max ?? null,
+          value_qty: entry.qty ?? entry.quantity ?? null,
+          source: entry.source || null,
+          received_at: now,
+        });
+        readingsInserted++;
+      }
+    }
+
+    logWebhook.run({
+      received_at: now,
+      payload_size: rawSize,
+      metric_names: [...new Set(metricNames)].join(','),
+      reading_count: readingsInserted,
+    });
+  });
+
+  ingestAll();
+
+  return { metricsProcessed: metricNames.length, readingsInserted };
+}
+
+/**
+ * Get the latest reading for every metric (or for a specific metric).
+ */
+function getLatest(metricName = null) {
+  if (metricName) {
+    return db.prepare(`
+      SELECT metric_name, units, date, value_min, value_avg, value_max, value_qty, source
+      FROM metric_readings
+      WHERE metric_name = ?
+      ORDER BY date_ts DESC
+      LIMIT 1
+    `).get(metricName);
+  }
+
+  return db.prepare(`
+    SELECT r.metric_name, r.units, r.date, r.value_min, r.value_avg, r.value_max, r.value_qty, r.source
+    FROM metric_readings r
+    INNER JOIN (
+      SELECT metric_name, MAX(date_ts) AS max_ts
+      FROM metric_readings
+      GROUP BY metric_name
+    ) latest ON r.metric_name = latest.metric_name AND r.date_ts = latest.max_ts
+    ORDER BY r.metric_name
+  `).all();
+}
+
+/**
+ * Get readings for a specific metric, optionally filtered by date (YYYY-MM-DD).
+ */
+function getMetricByDate(metricName, dateStr = null) {
+  if (dateStr) {
+    // Match any reading whose date field starts with the given date
+    return db.prepare(`
+      SELECT metric_name, units, date, value_min, value_avg, value_max, value_qty, source
+      FROM metric_readings
+      WHERE metric_name = ? AND date LIKE ?
+      ORDER BY date_ts ASC
+    `).all(metricName, `${dateStr}%`);
+  }
+
+  return db.prepare(`
+    SELECT metric_name, units, date, value_min, value_avg, value_max, value_qty, source
+    FROM metric_readings
+    WHERE metric_name = ?
+    ORDER BY date_ts DESC
+    LIMIT 100
+  `).all(metricName);
+}
+
+/**
+ * 7-day summary: daily aggregates per metric.
+ */
+function getSummary(days = 7) {
+  const cutoff = Math.floor(Date.now() / 1000) - days * 86400;
+  return db.prepare(`
+    SELECT
+      metric_name,
+      units,
+      substr(date, 1, 10)     AS day,
+      MIN(value_min)          AS day_min,
+      AVG(value_avg)          AS day_avg,
+      MAX(value_max)          AS day_max,
+      SUM(value_qty)          AS day_total,
+      COUNT(*)                AS readings
+    FROM metric_readings
+    WHERE date_ts >= ?
+    GROUP BY metric_name, day
+    ORDER BY metric_name, day
+  `).all(cutoff);
+}
+
+/**
+ * List distinct metric names.
+ */
+function listMetrics() {
+  return db.prepare(`
+    SELECT metric_name, units, COUNT(*) AS reading_count,
+           MAX(date) AS latest_date
+    FROM metric_readings
+    GROUP BY metric_name
+    ORDER BY metric_name
+  `).all();
+}
+
+module.exports = { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics };
