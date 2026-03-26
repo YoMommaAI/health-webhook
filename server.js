@@ -16,20 +16,18 @@ if (!API_KEY) {
 
 app.use(express.json({ limit: '10mb' }));
 
-// API key auth — checked on every request
+// Health check — unauthenticated so Railway's healthcheck probe passes
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', service: 'health-webhook' });
+});
+
+// API key auth — checked on every request except the healthcheck above
 app.use((req, res, next) => {
   const key = req.headers['x-api-key'] || req.query.api_key;
   if (key !== API_KEY) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   next();
-});
-
-// ── Routes ────────────────────────────────────────────────────────────────────
-
-// Health check (still requires API key so it doubles as a connectivity test)
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'health-webhook' });
 });
 
 /**
