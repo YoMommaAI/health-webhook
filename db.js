@@ -14,6 +14,18 @@ db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS locations (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    latitude   REAL NOT NULL,
+    longitude  REAL NOT NULL,
+    accuracy   REAL,
+    label      TEXT,
+    timestamp  TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_locations_timestamp ON locations(timestamp);
+
   CREATE TABLE IF NOT EXISTS metric_readings (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     metric_name TEXT    NOT NULL,
@@ -265,4 +277,31 @@ function listMetrics() {
   `).all();
 }
 
-module.exports = { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics };
+const insertLocationStmt = db.prepare(`
+  INSERT INTO locations (latitude, longitude, accuracy, label, timestamp)
+  VALUES (@latitude, @longitude, @accuracy, @label, @timestamp)
+`);
+
+function insertLocation({ latitude, longitude, accuracy = null, label = null, timestamp = null }) {
+  const info = insertLocationStmt.run({ latitude, longitude, accuracy, label, timestamp });
+  return db.prepare('SELECT * FROM locations WHERE id = ?').get(info.lastInsertRowid);
+}
+
+function getLatestLocation() {
+  return db.prepare(`
+    SELECT * FROM locations ORDER BY id DESC LIMIT 1
+  `).get();
+}
+
+function getLocationHistory(limit = 10, since = null) {
+  if (since) {
+    return db.prepare(`
+      SELECT * FROM locations WHERE timestamp >= ? ORDER BY id DESC LIMIT ?
+    `).all(since, limit);
+  }
+  return db.prepare(`
+    SELECT * FROM locations ORDER BY id DESC LIMIT ?
+  `).all(limit);
+}
+
+module.exports = { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, insertLocation, getLatestLocation, getLocationHistory };

@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const express = require('express');
-const { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics } = require('./db');
+const { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, insertLocation, getLatestLocation, getLocationHistory } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -106,6 +106,39 @@ app.get('/health/:metric', (req, res) => {
     return res.status(404).json({ error: `No data found for metric: ${metric}` });
   }
   res.json(data);
+});
+
+/**
+ * POST /location
+ * Record a new location reading.
+ */
+app.post('/location', (req, res) => {
+  const { latitude, longitude, accuracy, label, timestamp } = req.body || {};
+  if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+    return res.status(400).json({ error: 'latitude and longitude (numbers) are required' });
+  }
+  const row = insertLocation({ latitude, longitude, accuracy, label, timestamp });
+  res.json({ ok: true, location: row });
+});
+
+/**
+ * GET /location/latest
+ * Most recent location reading.
+ */
+app.get('/location/latest', (req, res) => {
+  const row = getLatestLocation();
+  if (!row) return res.status(404).json({ error: 'No location data found' });
+  res.json(row);
+});
+
+/**
+ * GET /location/history?limit=10&since=2026-04-01
+ * Location history, newest first.
+ */
+app.get('/location/history', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 10, 1000);
+  const since = req.query.since || null;
+  res.json(getLocationHistory(limit, since));
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
