@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const express = require('express');
-const { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, insertLocation, getLatestLocation, getLocationHistory } = require('./db');
+const { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, saveLocation, getLatestLocation, getLocationHistory } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -110,35 +110,47 @@ app.get('/health/:metric', (req, res) => {
 
 /**
  * POST /location
- * Record a new location reading.
+ * Store a GPS location fix from an iOS Shortcut.
+ * Body: { latitude, longitude, accuracy?, label?, timestamp }
  */
 app.post('/location', (req, res) => {
   const { latitude, longitude, accuracy, label, timestamp } = req.body || {};
-  if (typeof latitude !== 'number' || typeof longitude !== 'number') {
-    return res.status(400).json({ error: 'latitude and longitude (numbers) are required' });
+  if (latitude == null || longitude == null || !timestamp) {
+    return res.status(400).json({ error: 'latitude, longitude, and timestamp are required' });
   }
-  const row = insertLocation({ latitude, longitude, accuracy, label, timestamp });
-  res.json({ ok: true, location: row });
+  try {
+    saveLocation({ latitude, longitude, accuracy, label, timestamp });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 /**
  * GET /location/latest
- * Most recent location reading.
+ * Most recent location entry.
  */
 app.get('/location/latest', (req, res) => {
-  const row = getLatestLocation();
-  if (!row) return res.status(404).json({ error: 'No location data found' });
-  res.json(row);
+  const data = getLatestLocation();
+  if (!data) {
+    return res.status(404).json({ error: 'No location data found' });
+  }
+  res.json(data);
 });
 
 /**
+ * GET /location/history
  * GET /location/history?limit=10&since=2026-04-01
- * Location history, newest first.
+ * Recent location history. limit max 100, default 10.
  */
 app.get('/location/history', (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit, 10) || 10, 1000);
-  const since = req.query.since || null;
-  res.json(getLocationHistory(limit, since));
+  const limit = parseInt(req.query.limit, 10) || 10;
+  const { since } = req.query;
+  if (since && isNaN(new Date(since).getTime())) {
+    return res.status(400).json({ error: 'Invalid since date' });
+  }
+  const data = getLocationHistory(limit, since || null);
+  res.json(data);
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────

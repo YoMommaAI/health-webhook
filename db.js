@@ -14,18 +14,6 @@ db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
 db.exec(`
-  CREATE TABLE IF NOT EXISTS locations (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    latitude   REAL NOT NULL,
-    longitude  REAL NOT NULL,
-    accuracy   REAL,
-    label      TEXT,
-    timestamp  TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_locations_timestamp ON locations(timestamp);
-
   CREATE TABLE IF NOT EXISTS metric_readings (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     metric_name TEXT    NOT NULL,
@@ -51,6 +39,19 @@ db.exec(`
     metric_names TEXT,
     reading_count INTEGER
   );
+
+  CREATE TABLE IF NOT EXISTS locations (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    latitude     REAL    NOT NULL,
+    longitude    REAL    NOT NULL,
+    accuracy     REAL,
+    label        TEXT,
+    timestamp    TEXT    NOT NULL,
+    timestamp_ts INTEGER,
+    created_at   INTEGER
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_locations_ts ON locations(timestamp_ts);
 `);
 
 // Migrate: add sleep-specific columns if not present (safe to re-run)
@@ -70,6 +71,24 @@ for (const [col, type] of sleepCols) {
     db.exec(`ALTER TABLE metric_readings ADD COLUMN ${col} ${type}`);
   }
 }
+
+// Migrate: add timestamp_ts to locations if not present (safe to re-run)
+const existingLocationCols = new Set(
+  db.prepare('PRAGMA table_info(locations)').all().map(c => c.name)
+);
+if (!existingLocationCols.has('timestamp_ts')) {
+  db.exec(`ALTER TABLE locations ADD COLUMN timestamp_ts INTEGER`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_locations_ts ON locations(timestamp_ts)`);
+}
+if (!existingLocationCols.has('created_at')) {
+  db.exec(`ALTER TABLE locations ADD COLUMN created_at INTEGER`);
+}
+// Backfill timestamp_ts for any rows that have a parseable timestamp but no timestamp_ts
+db.exec(`
+  UPDATE locations
+  SET timestamp_ts = CAST(strftime('%s', timestamp) AS INTEGER)
+  WHERE timestamp_ts IS NULL AND timestamp IS NOT NULL
+`);
 
 // Upsert a single reading row
 const upsertReading = db.prepare(`
@@ -277,31 +296,67 @@ function listMetrics() {
   `).all();
 }
 
-const insertLocationStmt = db.prepare(`
-  INSERT INTO locations (latitude, longitude, accuracy, label, timestamp)
-  VALUES (@latitude, @longitude, @accuracy, @label, @timestamp)
+const insertLocation = db.prepare(`
+  INSERT INTO locations (latitude, longitude, accuracy, label, timestamp, timestamp_ts, created_at)
+  VALUES (@latitude, @longitude, @accuracy, @label, @timestamp, @timestamp_ts, @created_at)
 `);
 
-function insertLocation({ latitude, longitude, accuracy = null, label = null, timestamp = null }) {
-  const info = insertLocationStmt.run({ latitude, longitude, accuracy, label, timestamp });
-  return db.prepare('SELECT * FROM locations WHERE id = ?').get(info.lastInsertRowid);
+/**
+ * Store a GPS location fix.
+ */
+function saveLocation({ latitude, longitude, accuracy = null, label = null, timestamp }) {
+  if (latitude == null || longitude == null || !timestamp) {
+    throw new Error('latitude, longitude, and timestamp are required');
+  }
+  const ts = new Date(timestamp).getTime();
+  if (isNaN(ts)) throw new Error('Invalid timestamp');
+  const now = Math.floor(Date.now() / 1000);
+  insertLocation.run({
+    latitude,
+    longitude,
+    accuracy: accuracy ?? null,
+    label: label ?? null,
+    timestamp,
+    timestamp_ts: Math.floor(ts / 1000),
+    created_at: now,
+  });
 }
 
+/**
+ * Get the most recent location entry.
+ */
 function getLatestLocation() {
   return db.prepare(`
-    SELECT * FROM locations ORDER BY id DESC LIMIT 1
+    SELECT id, latitude, longitude, accuracy, label, timestamp, created_at
+    FROM locations
+    ORDER BY timestamp_ts DESC
+    LIMIT 1
   `).get();
 }
 
+/**
+ * Get location history, optionally limited and filtered by a since date.
+ * @param {number} limit - max rows to return (default 10, max 100)
+ * @param {string|null} since - ISO date string; only return entries at or after this time
+ */
 function getLocationHistory(limit = 10, since = null) {
+  const cap = Math.min(limit, 100);
   if (since) {
+    const sinceTs = Math.floor(new Date(since).getTime() / 1000);
     return db.prepare(`
-      SELECT * FROM locations WHERE timestamp >= ? ORDER BY id DESC LIMIT ?
-    `).all(since, limit);
+      SELECT id, latitude, longitude, accuracy, label, timestamp, created_at
+      FROM locations
+      WHERE timestamp_ts >= ?
+      ORDER BY timestamp_ts DESC
+      LIMIT ?
+    `).all(sinceTs, cap);
   }
   return db.prepare(`
-    SELECT * FROM locations ORDER BY id DESC LIMIT ?
-  `).all(limit);
+    SELECT id, latitude, longitude, accuracy, label, timestamp, created_at
+    FROM locations
+    ORDER BY timestamp_ts DESC
+    LIMIT ?
+  `).all(cap);
 }
 
-module.exports = { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, insertLocation, getLatestLocation, getLocationHistory };
+module.exports = { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, saveLocation, getLatestLocation, getLocationHistory };
