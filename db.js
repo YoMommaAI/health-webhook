@@ -41,17 +41,47 @@ db.exec(`
   );
 `);
 
+// Migrate: add sleep-specific columns if not present (safe to re-run)
+const existingCols = new Set(
+  db.prepare('PRAGMA table_info(metric_readings)').all().map(c => c.name)
+);
+const sleepCols = [
+  ['sleep_deep',  'REAL'],
+  ['sleep_rem',   'REAL'],
+  ['sleep_core',  'REAL'],
+  ['sleep_in_bed','REAL'],
+  ['sleep_start', 'TEXT'],
+  ['sleep_end',   'TEXT'],
+];
+for (const [col, type] of sleepCols) {
+  if (!existingCols.has(col)) {
+    db.exec(`ALTER TABLE metric_readings ADD COLUMN ${col} ${type}`);
+  }
+}
+
 // Upsert a single reading row
 const upsertReading = db.prepare(`
   INSERT INTO metric_readings
-    (metric_name, units, date, date_ts, value_min, value_avg, value_max, value_qty, source, received_at)
+    (metric_name, units, date, date_ts,
+     value_min, value_avg, value_max, value_qty,
+     sleep_deep, sleep_rem, sleep_core, sleep_in_bed, sleep_start, sleep_end,
+     source, received_at)
   VALUES
-    (@metric_name, @units, @date, @date_ts, @value_min, @value_avg, @value_max, @value_qty, @source, @received_at)
+    (@metric_name, @units, @date, @date_ts,
+     @value_min, @value_avg, @value_max, @value_qty,
+     @sleep_deep, @sleep_rem, @sleep_core, @sleep_in_bed, @sleep_start, @sleep_end,
+     @source, @received_at)
   ON CONFLICT(metric_name, date, source) DO UPDATE SET
     value_min   = excluded.value_min,
     value_avg   = excluded.value_avg,
     value_max   = excluded.value_max,
     value_qty   = excluded.value_qty,
+    sleep_deep  = excluded.sleep_deep,
+    sleep_rem   = excluded.sleep_rem,
+    sleep_core  = excluded.sleep_core,
+    sleep_in_bed = excluded.sleep_in_bed,
+    sleep_start = excluded.sleep_start,
+    sleep_end   = excluded.sleep_end,
     units       = excluded.units,
     received_at = excluded.received_at
 `);
@@ -101,15 +131,27 @@ function ingestPayload(payload, rawSize) {
         const date_ts = parseHealthDate(dateStr);
         if (!date_ts) continue;
 
+        // Sleep analysis uses different field names than other metrics
+        const isSleep = entry.asleep != null || entry.totalSleep != null ||
+                        entry.inBed != null || entry.sleepStart != null;
+
         upsertReading.run({
           metric_name: name,
           units,
           date: dateStr,
           date_ts,
-          value_min: entry.Min ?? entry.min ?? null,
-          value_avg: entry.Avg ?? entry.avg ?? entry.value ?? null,
-          value_max: entry.Max ?? entry.max ?? null,
-          value_qty: entry.qty ?? entry.quantity ?? null,
+          value_min:   entry.Min ?? entry.min ?? null,
+          value_avg:   entry.Avg ?? entry.avg ?? entry.value ?? null,
+          value_max:   entry.Max ?? entry.max ?? null,
+          value_qty:   isSleep
+            ? (entry.asleep ?? entry.totalSleep ?? null)
+            : (entry.qty ?? entry.quantity ?? null),
+          sleep_deep:   entry.deep   ?? null,
+          sleep_rem:    entry.rem    ?? null,
+          sleep_core:   entry.core   ?? null,
+          sleep_in_bed: entry.inBed  ?? null,
+          sleep_start:  entry.sleepStart ?? null,
+          sleep_end:    entry.sleepEnd   ?? null,
           source: entry.source || null,
           received_at: now,
         });
@@ -134,9 +176,12 @@ function ingestPayload(payload, rawSize) {
  * Get the latest reading for every metric (or for a specific metric).
  */
 function getLatest(metricName = null) {
+  const cols = `metric_name, units, date, value_min, value_avg, value_max, value_qty,
+                sleep_deep, sleep_rem, sleep_core, sleep_in_bed, sleep_start, sleep_end, source`;
+
   if (metricName) {
     return db.prepare(`
-      SELECT metric_name, units, date, value_min, value_avg, value_max, value_qty, source
+      SELECT ${cols}
       FROM metric_readings
       WHERE metric_name = ?
       ORDER BY date_ts DESC
@@ -145,7 +190,7 @@ function getLatest(metricName = null) {
   }
 
   return db.prepare(`
-    SELECT r.metric_name, r.units, r.date, r.value_min, r.value_avg, r.value_max, r.value_qty, r.source
+    SELECT ${cols}
     FROM metric_readings r
     INNER JOIN (
       SELECT metric_name, MAX(date_ts) AS max_ts
@@ -160,10 +205,12 @@ function getLatest(metricName = null) {
  * Get readings for a specific metric, optionally filtered by date (YYYY-MM-DD).
  */
 function getMetricByDate(metricName, dateStr = null) {
+  const cols = `metric_name, units, date, value_min, value_avg, value_max, value_qty,
+                sleep_deep, sleep_rem, sleep_core, sleep_in_bed, sleep_start, sleep_end, source`;
+
   if (dateStr) {
-    // Match any reading whose date field starts with the given date
     return db.prepare(`
-      SELECT metric_name, units, date, value_min, value_avg, value_max, value_qty, source
+      SELECT ${cols}
       FROM metric_readings
       WHERE metric_name = ? AND date LIKE ?
       ORDER BY date_ts ASC
@@ -171,7 +218,7 @@ function getMetricByDate(metricName, dateStr = null) {
   }
 
   return db.prepare(`
-    SELECT metric_name, units, date, value_min, value_avg, value_max, value_qty, source
+    SELECT ${cols}
     FROM metric_readings
     WHERE metric_name = ?
     ORDER BY date_ts DESC
@@ -193,6 +240,10 @@ function getSummary(days = 7) {
       AVG(value_avg)          AS day_avg,
       MAX(value_max)          AS day_max,
       SUM(value_qty)          AS day_total,
+      AVG(sleep_deep)         AS sleep_deep_avg,
+      AVG(sleep_rem)          AS sleep_rem_avg,
+      AVG(sleep_core)         AS sleep_core_avg,
+      AVG(sleep_in_bed)       AS sleep_in_bed_avg,
       COUNT(*)                AS readings
     FROM metric_readings
     WHERE date_ts >= ?
