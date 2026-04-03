@@ -51,7 +51,6 @@ db.exec(`
     created_at   INTEGER
   );
 
-  CREATE INDEX IF NOT EXISTS idx_locations_ts ON locations(timestamp_ts);
 `);
 
 // Migrate: add sleep-specific columns if not present (safe to re-run)
