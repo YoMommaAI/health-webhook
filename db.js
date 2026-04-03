@@ -170,6 +170,33 @@ function ingestPayload(payload, rawSize) {
           console.log('[sleep_analysis] sample entry:', JSON.stringify(entry));
         }
 
+        const sleepDeep  = entry.deep  ?? null;
+        const sleepRem   = entry.rem   ?? null;
+        const sleepCore  = entry.core  ?? null;
+        const sleepStart = entry.sleepStart ?? null;
+        const sleepEnd   = entry.sleepEnd   ?? null;
+
+        // Compute total sleep from stages if the explicit total is missing/zero
+        let valueQty = isSleep
+          ? (entry.asleep ?? entry.totalSleep ?? entry.qty ?? entry.quantity ?? null)
+          : (entry.qty ?? entry.quantity ?? null);
+        if (isSleep && (valueQty == null || valueQty === 0)) {
+          if (sleepDeep != null || sleepRem != null || sleepCore != null) {
+            const computed = (sleepDeep ?? 0) + (sleepRem ?? 0) + (sleepCore ?? 0);
+            if (computed > 0) valueQty = computed;
+          }
+        }
+
+        // Compute sleep_in_bed from the sleep window if inBed not in payload
+        let sleepInBed = entry.inBed ?? null;
+        if (isSleep && (sleepInBed == null || sleepInBed === 0) && sleepStart && sleepEnd) {
+          const startTs = parseHealthDate(sleepStart);
+          const endTs   = parseHealthDate(sleepEnd);
+          if (startTs && endTs && endTs > startTs) {
+            sleepInBed = (endTs - startTs) / 3600; // hours
+          }
+        }
+
         upsertReading.run({
           metric_name: name,
           units,
@@ -178,15 +205,13 @@ function ingestPayload(payload, rawSize) {
           value_min:   entry.Min ?? entry.min ?? null,
           value_avg:   entry.Avg ?? entry.avg ?? entry.value ?? null,
           value_max:   entry.Max ?? entry.max ?? null,
-          value_qty:   isSleep
-            ? (entry.asleep ?? entry.totalSleep ?? entry.qty ?? entry.quantity ?? null)
-            : (entry.qty ?? entry.quantity ?? null),
-          sleep_deep:   entry.deep   ?? null,
-          sleep_rem:    entry.rem    ?? null,
-          sleep_core:   entry.core   ?? null,
-          sleep_in_bed: entry.inBed  ?? null,
-          sleep_start:  entry.sleepStart ?? null,
-          sleep_end:    entry.sleepEnd   ?? null,
+          value_qty:   valueQty,
+          sleep_deep:   sleepDeep,
+          sleep_rem:    sleepRem,
+          sleep_core:   sleepCore,
+          sleep_in_bed: sleepInBed,
+          sleep_start:  sleepStart,
+          sleep_end:    sleepEnd,
           source: entry.source || null,
           received_at: now,
         });
@@ -279,6 +304,8 @@ function getSummary(days = 7) {
       AVG(sleep_rem)          AS sleep_rem_avg,
       AVG(sleep_core)         AS sleep_core_avg,
       AVG(sleep_in_bed)       AS sleep_in_bed_avg,
+      MAX(sleep_start)        AS sleep_start,
+      MAX(sleep_end)          AS sleep_end,
       COUNT(*)                AS readings
     FROM metric_readings
     WHERE date_ts >= ?
