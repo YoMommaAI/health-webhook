@@ -164,12 +164,6 @@ function ingestPayload(payload, rawSize) {
         // Sleep analysis uses different field names than other metrics
         const isSleep = name === 'sleep_analysis';
 
-        // Diagnostic: log sleep entries so we can see the actual payload fields
-        if (isSleep && readingsInserted === 0) {
-          console.log('[sleep_analysis] sample entry keys:', Object.keys(entry));
-          console.log('[sleep_analysis] sample entry:', JSON.stringify(entry));
-        }
-
         const sleepDeep  = entry.deep  ?? null;
         const sleepRem   = entry.rem   ?? null;
         const sleepCore  = entry.core  ?? null;
