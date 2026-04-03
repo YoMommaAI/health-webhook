@@ -163,8 +163,13 @@ function ingestPayload(payload, rawSize) {
         if (!date_ts) continue;
 
         // Sleep analysis uses different field names than other metrics
-        const isSleep = entry.asleep != null || entry.totalSleep != null ||
-                        entry.inBed != null || entry.sleepStart != null;
+        const isSleep = name === 'sleep_analysis';
+
+        // Diagnostic: log sleep entries so we can see the actual payload fields
+        if (isSleep && readingsInserted === 0) {
+          console.log('[sleep_analysis] sample entry keys:', Object.keys(entry));
+          console.log('[sleep_analysis] sample entry:', JSON.stringify(entry));
+        }
 
         upsertReading.run({
           metric_name: name,
@@ -175,7 +180,7 @@ function ingestPayload(payload, rawSize) {
           value_avg:   entry.Avg ?? entry.avg ?? entry.value ?? null,
           value_max:   entry.Max ?? entry.max ?? null,
           value_qty:   isSleep
-            ? (entry.asleep ?? entry.totalSleep ?? null)
+            ? (entry.asleep ?? entry.totalSleep ?? entry.qty ?? entry.quantity ?? null)
             : (entry.qty ?? entry.quantity ?? null),
           sleep_deep:   entry.deep   ?? null,
           sleep_rem:    entry.rem    ?? null,
