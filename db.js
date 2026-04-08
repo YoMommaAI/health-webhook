@@ -51,6 +51,24 @@ db.exec(`
     created_at   INTEGER
   );
 
+  CREATE TABLE IF NOT EXISTS workouts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    workout_type  TEXT    NOT NULL,
+    start_time    TEXT    NOT NULL,
+    end_time      TEXT,
+    start_ts      INTEGER NOT NULL,
+    end_ts        INTEGER,
+    duration      REAL,
+    active_energy REAL,
+    distance      REAL,
+    distance_unit TEXT,
+    source        TEXT,
+    received_at   INTEGER NOT NULL,
+    UNIQUE(workout_type, start_time, source)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_workouts_start ON workouts(start_ts);
+
 `);
 
 // Migrate: add sleep-specific columns if not present (safe to re-run)
@@ -121,6 +139,23 @@ const logWebhook = db.prepare(`
   VALUES (@received_at, @payload_size, @metric_names, @reading_count)
 `);
 
+const upsertWorkout = db.prepare(`
+  INSERT INTO workouts
+    (workout_type, start_time, end_time, start_ts, end_ts,
+     duration, active_energy, distance, distance_unit, source, received_at)
+  VALUES
+    (@workout_type, @start_time, @end_time, @start_ts, @end_ts,
+     @duration, @active_energy, @distance, @distance_unit, @source, @received_at)
+  ON CONFLICT(workout_type, start_time, source) DO UPDATE SET
+    end_time      = excluded.end_time,
+    end_ts        = excluded.end_ts,
+    duration      = excluded.duration,
+    active_energy = excluded.active_energy,
+    distance      = excluded.distance,
+    distance_unit = excluded.distance_unit,
+    received_at   = excluded.received_at
+`);
+
 /**
  * Parse a Health Auto Export date string to a Unix timestamp (seconds).
  * Format: "2026-03-24 16:20:00 -0700"
@@ -135,7 +170,7 @@ function parseHealthDate(dateStr) {
 
 /**
  * Ingest a full Health Auto Export payload.
- * Returns { metricsProcessed, readingsInserted }
+ * Returns { metricsProcessed, readingsInserted, workoutsInserted }
  */
 function ingestPayload(payload, rawSize) {
   const now = Math.floor(Date.now() / 1000);
@@ -146,6 +181,7 @@ function ingestPayload(payload, rawSize) {
   }
 
   let readingsInserted = 0;
+  let workoutsInserted = 0;
   const metricNames = [];
 
   const ingestAll = db.transaction(() => {
@@ -213,17 +249,51 @@ function ingestPayload(payload, rawSize) {
       }
     }
 
+    // Handle workouts from data.workouts (Health Auto Export dedicated key)
+    const workoutEntries = payload?.data?.workouts;
+    if (Array.isArray(workoutEntries)) {
+      for (const entry of workoutEntries) {
+        const startStr = entry.start ?? entry.startDate ?? null;
+        const endStr   = entry.end   ?? entry.endDate   ?? null;
+        const start_ts = parseHealthDate(startStr);
+        if (!start_ts || !startStr) continue;
+
+        const workoutType = entry.name ?? entry.workoutActivityType ?? 'Unknown';
+        const end_ts      = parseHealthDate(endStr);
+        // duration: Health Auto Export sends in minutes; fall back to deriving from timestamps
+        let duration = entry.duration ?? null;
+        if (duration == null && start_ts && end_ts) {
+          duration = (end_ts - start_ts) / 60;
+        }
+
+        upsertWorkout.run({
+          workout_type:  workoutType,
+          start_time:    startStr,
+          end_time:      endStr ?? null,
+          start_ts,
+          end_ts:        end_ts ?? null,
+          duration,
+          active_energy: entry.activeEnergy ?? entry.totalEnergyBurned ?? null,
+          distance:      entry.distance ?? null,
+          distance_unit: entry.distanceUnit ?? null,
+          source:        entry.source ?? null,
+          received_at:   now,
+        });
+        workoutsInserted++;
+      }
+    }
+
     logWebhook.run({
       received_at: now,
       payload_size: rawSize,
       metric_names: [...new Set(metricNames)].join(','),
-      reading_count: readingsInserted,
+      reading_count: readingsInserted + workoutsInserted,
     });
   });
 
   ingestAll();
 
-  return { metricsProcessed: metricNames.length, readingsInserted };
+  return { metricsProcessed: metricNames.length, readingsInserted, workoutsInserted };
 }
 
 /**
@@ -309,6 +379,51 @@ function getSummary(days = 7) {
 }
 
 /**
+ * Get recent workouts, optionally filtered by type.
+ */
+function getWorkouts(days = 30, workoutType = null) {
+  const cutoff = Math.floor(Date.now() / 1000) - days * 86400;
+  if (workoutType) {
+    return db.prepare(`
+      SELECT workout_type, start_time, end_time, duration,
+             active_energy, distance, distance_unit, source
+      FROM workouts
+      WHERE start_ts >= ? AND workout_type = ?
+      ORDER BY start_ts DESC
+    `).all(cutoff, workoutType);
+  }
+  return db.prepare(`
+    SELECT workout_type, start_time, end_time, duration,
+           active_energy, distance, distance_unit, source
+    FROM workouts
+    WHERE start_ts >= ?
+    ORDER BY start_ts DESC
+  `).all(cutoff);
+}
+
+/**
+ * Workout summary: daily aggregates per workout type over the last N days.
+ */
+function getWorkoutSummary(days = 7) {
+  const cutoff = Math.floor(Date.now() / 1000) - days * 86400;
+  return db.prepare(`
+    SELECT
+      workout_type,
+      substr(start_time, 1, 10)   AS day,
+      COUNT(*)                    AS session_count,
+      SUM(duration)               AS total_duration,
+      AVG(duration)               AS avg_duration,
+      SUM(active_energy)          AS total_calories,
+      SUM(distance)               AS total_distance,
+      MAX(distance_unit)          AS distance_unit
+    FROM workouts
+    WHERE start_ts >= ?
+    GROUP BY workout_type, day
+    ORDER BY day DESC, workout_type
+  `).all(cutoff);
+}
+
+/**
  * List distinct metric names.
  */
 function listMetrics() {
@@ -384,4 +499,4 @@ function getLocationHistory(limit = 10, since = null) {
   `).all(cap);
 }
 
-module.exports = { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, saveLocation, getLatestLocation, getLocationHistory };
+module.exports = { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, getWorkouts, getWorkoutSummary, saveLocation, getLatestLocation, getLocationHistory };

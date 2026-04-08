@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const express = require('express');
-const { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, saveLocation, getLatestLocation, getLocationHistory } = require('./db');
+const { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, getWorkouts, getWorkoutSummary, saveLocation, getLatestLocation, getLocationHistory } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -86,6 +86,22 @@ app.get('/health/summary', (req, res) => {
     return res.status(400).json({ error: 'days must be between 1 and 365' });
   }
   const data = getSummary(days);
+  const workouts = getWorkoutSummary(days);
+  res.json({ days, data, workouts });
+});
+
+/**
+ * GET /health/workouts
+ * GET /health/workouts?days=30&type=Running
+ * Individual workout sessions over the last N days (default 30).
+ */
+app.get('/health/workouts', (req, res) => {
+  const days = parseInt(req.query.days, 10) || 30;
+  if (days < 1 || days > 365) {
+    return res.status(400).json({ error: 'days must be between 1 and 365' });
+  }
+  const { type } = req.query;
+  const data = getWorkouts(days, type || null);
   res.json({ days, data });
 });
 
