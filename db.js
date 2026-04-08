@@ -260,10 +260,10 @@ function ingestPayload(payload, rawSize) {
 
         const workoutType = entry.name ?? entry.workoutActivityType ?? 'Unknown';
         const end_ts      = parseHealthDate(endStr);
-        // duration: Health Auto Export sends in minutes; fall back to deriving from timestamps
+        // duration: Health Auto Export sends in seconds; fall back to deriving from timestamps
         let duration = entry.duration ?? null;
         if (duration == null && start_ts && end_ts) {
-          duration = (end_ts - start_ts) / 60;
+          duration = end_ts - start_ts;
         }
 
         upsertWorkout.run({
@@ -273,7 +273,7 @@ function ingestPayload(payload, rawSize) {
           start_ts,
           end_ts:        end_ts ?? null,
           duration,
-          active_energy: entry.activeEnergy ?? entry.totalEnergyBurned ?? null,
+          active_energy: entry.activeEnergyBurned ?? entry.activeEnergy ?? entry.totalEnergyBurned ?? null,
           distance:      entry.distance ?? null,
           distance_unit: entry.distanceUnit ?? null,
           source:        entry.source ?? null,
