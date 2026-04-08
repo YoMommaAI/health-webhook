@@ -69,6 +69,20 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_workouts_start ON workouts(start_ts);
 
+  CREATE TABLE IF NOT EXISTS call_results (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id      TEXT    NOT NULL UNIQUE,
+    phone_number TEXT,
+    status       TEXT,
+    duration     REAL,
+    transcript   TEXT,
+    summary      TEXT,
+    cost         REAL,
+    received_at  INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_call_results_received ON call_results(received_at);
+
 `);
 
 // Migrate: add sleep-specific columns if not present (safe to re-run)
@@ -499,4 +513,51 @@ function getLocationHistory(limit = 10, since = null) {
   `).all(cap);
 }
 
-module.exports = { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, getWorkouts, getWorkoutSummary, saveLocation, getLatestLocation, getLocationHistory };
+const upsertCallResult = db.prepare(`
+  INSERT INTO call_results (call_id, phone_number, status, duration, transcript, summary, cost, received_at)
+  VALUES (@call_id, @phone_number, @status, @duration, @transcript, @summary, @cost, @received_at)
+  ON CONFLICT(call_id) DO UPDATE SET
+    status      = excluded.status,
+    duration    = excluded.duration,
+    transcript  = excluded.transcript,
+    summary     = excluded.summary,
+    cost        = excluded.cost,
+    received_at = excluded.received_at
+`);
+
+/**
+ * Store a Bland AI post-call webhook payload.
+ */
+function saveCallResult(payload) {
+  const now = Math.floor(Date.now() / 1000);
+  const transcript = Array.isArray(payload.transcripts)
+    ? payload.transcripts.map(t => `${t.user}: ${t.text}`).join('\n')
+    : (payload.concatenated_transcript || null);
+
+  upsertCallResult.run({
+    call_id:      payload.call_id || null,
+    phone_number: payload.to || null,
+    status:       payload.status || payload.queue_status || null,
+    duration:     payload.call_length ?? payload.corrected_duration ?? null,
+    transcript,
+    summary:      payload.summary || null,
+    cost:         payload.price ?? null,
+    received_at:  now,
+  });
+}
+
+/**
+ * Get recent call results, newest first.
+ */
+function getCallResults(limit = 50) {
+  const cap = Math.min(limit, 200);
+  return db.prepare(`
+    SELECT call_id, phone_number, status, duration, summary, cost,
+           datetime(received_at, 'unixepoch') AS received_at, transcript
+    FROM call_results
+    ORDER BY received_at DESC
+    LIMIT ?
+  `).all(cap);
+}
+
+module.exports = { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, getWorkouts, getWorkoutSummary, saveLocation, getLatestLocation, getLocationHistory, saveCallResult, getCallResults };

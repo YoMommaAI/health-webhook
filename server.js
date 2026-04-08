@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const express = require('express');
-const { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, getWorkouts, getWorkoutSummary, saveLocation, getLatestLocation, getLocationHistory } = require('./db');
+const { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, getWorkouts, getWorkoutSummary, saveLocation, getLatestLocation, getLocationHistory, saveCallResult, getCallResults } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -21,6 +21,26 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'health-webhook' });
 });
 
+/**
+ * POST /bland/webhook
+ * Receives Bland AI post-call payloads. No auth — Bland can't send our API key.
+ * Stores results in the call_results SQLite table.
+ */
+app.post('/bland/webhook', (req, res) => {
+  const payload = req.body || {};
+  if (!payload.call_id) {
+    return res.status(400).json({ error: 'Missing call_id in payload' });
+  }
+  try {
+    saveCallResult(payload);
+    console.log(`[bland] stored result for call ${payload.call_id} (status: ${payload.status || payload.queue_status})`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[bland] webhook error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // API key auth — checked on every request except the healthcheck above
 app.use((req, res, next) => {
   const key = req.headers['x-api-key'] || req.query.api_key;
@@ -28,6 +48,19 @@ app.use((req, res, next) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   next();
+});
+
+/**
+ * GET /bland/calls
+ * Retrieve stored Bland AI call results. Requires API key auth.
+ * Optional query param: ?limit=N (max 200, default 50)
+ */
+app.get('/bland/calls', (req, res) => {
+  const limit = parseInt(req.query.limit, 10) || 50;
+  if (limit < 1 || limit > 200) {
+    return res.status(400).json({ error: 'limit must be between 1 and 200' });
+  }
+  res.json(getCallResults(limit));
 });
 
 /**
