@@ -66,16 +66,47 @@ app.get('/bland/calls', (req, res) => {
 /**
  * POST /webhook
  * Receives a Health Auto Export JSON payload and stores it.
+ *
+ * Accepts multiple payload shapes the app has used over time:
+ *   1. { data: { metrics: [...], workouts: [...] } }   ← original format
+ *   2. { metrics: [...], workouts: [...] }              ← newer flat format
+ *   3. { data: { metrics: { ... } } }                  ← single-metric object
+ *   4. { metrics: { ... } }                            ← single-metric flat
+ *
+ * We normalize everything into shape #1 before handing off to ingestPayload.
  */
 app.post('/webhook', (req, res) => {
   const raw = req.body;
-  if (!raw || !raw.data) {
-    return res.status(400).json({ error: 'Invalid payload: expected { data: { metrics: [...] } }' });
+  if (!raw) {
+    return res.status(400).json({ error: 'Empty payload' });
+  }
+
+  // ── Normalize into { data: { metrics: [...], workouts: [...] } } ──────────
+  let normalized = raw;
+
+  // If there's no `data` wrapper but there IS a top-level `metrics` key, wrap it
+  if (!raw.data && (raw.metrics !== undefined || raw.workouts !== undefined)) {
+    normalized = { data: { metrics: raw.metrics, workouts: raw.workouts } };
+  }
+
+  // At this point we need normalized.data to exist with something to ingest
+  if (!normalized.data) {
+    return res.status(400).json({ error: 'Invalid payload: expected metrics array in data.metrics or at top level' });
+  }
+
+  // If metrics is a single object instead of an array, wrap it
+  if (normalized.data.metrics && !Array.isArray(normalized.data.metrics)) {
+    normalized.data.metrics = [normalized.data.metrics];
+  }
+
+  // If metrics is missing entirely but workouts exist, default to empty array
+  if (!normalized.data.metrics && normalized.data.workouts) {
+    normalized.data.metrics = [];
   }
 
   try {
     const rawSize = JSON.stringify(raw).length;
-    const result = ingestPayload(raw, rawSize);
+    const result = ingestPayload(normalized, rawSize);
     res.json({ ok: true, ...result });
   } catch (err) {
     console.error('Ingest error:', err.message);

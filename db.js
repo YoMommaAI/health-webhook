@@ -188,10 +188,22 @@ function parseHealthDate(dateStr) {
  */
 function ingestPayload(payload, rawSize) {
   const now = Math.floor(Date.now() / 1000);
-  const metrics = payload?.data?.metrics;
 
+  // Defensively locate the metrics array — support multiple payload shapes
+  let metrics = payload?.data?.metrics ?? payload?.metrics ?? null;
+
+  // If a single metric object was passed instead of an array, wrap it
+  if (metrics && !Array.isArray(metrics)) {
+    metrics = [metrics];
+  }
+
+  // Allow workouts-only payloads (metrics can be an empty array)
+  const hasWorkouts = Array.isArray(payload?.data?.workouts) || Array.isArray(payload?.workouts);
+  if (!Array.isArray(metrics) && !hasWorkouts) {
+    throw new Error('Invalid payload: expected metrics array in data.metrics or at top level');
+  }
   if (!Array.isArray(metrics)) {
-    throw new Error('Invalid payload: expected data.metrics array');
+    metrics = [];
   }
 
   let readingsInserted = 0;
@@ -263,8 +275,8 @@ function ingestPayload(payload, rawSize) {
       }
     }
 
-    // Handle workouts from data.workouts (Health Auto Export dedicated key)
-    const workoutEntries = payload?.data?.workouts;
+    // Handle workouts from data.workouts or top-level workouts
+    const workoutEntries = payload?.data?.workouts ?? payload?.workouts;
     if (Array.isArray(workoutEntries)) {
       for (const entry of workoutEntries) {
         const startStr = entry.start ?? entry.startDate ?? null;
