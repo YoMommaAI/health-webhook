@@ -183,6 +183,38 @@ function parseHealthDate(dateStr) {
 }
 
 /**
+ * Ensure a value is a SQLite-bindable primitive (number, string, bigint, Buffer, or null).
+ * Health Auto Export sometimes sends objects or arrays where we expect scalars
+ * (e.g. source: { name: "Apple Watch", bundleIdentifier: "..." }).
+ * - Objects with a `name` property → extract name string
+ * - Other objects/arrays → JSON.stringify
+ * - Everything else passes through unchanged
+ */
+function toScalar(val) {
+  if (val == null) return null;
+  if (typeof val === 'number' || typeof val === 'string' || typeof val === 'bigint' || Buffer.isBuffer(val)) {
+    return val;
+  }
+  if (typeof val === 'boolean') return val ? 1 : 0;
+  if (typeof val === 'object') {
+    // Common pattern: source is { name: "Apple Watch", ... }
+    if (!Array.isArray(val) && typeof val.name === 'string') return val.name;
+    return JSON.stringify(val);
+  }
+  return String(val);
+}
+
+/** Coerce to a number or null — safely handles objects that aren't numeric. */
+function toNum(val) {
+  if (val == null) return null;
+  if (typeof val === 'number') return val;
+  if (typeof val === 'string') { const n = Number(val); return isNaN(n) ? null : n; }
+  // If it's an object/array, it's not a valid number
+  if (typeof val === 'object') return null;
+  return null;
+}
+
+/**
  * Ingest a full Health Auto Export payload.
  * Returns { metricsProcessed, readingsInserted, workoutsInserted }
  */
@@ -254,22 +286,22 @@ function ingestPayload(payload, rawSize) {
         }
 
         upsertReading.run({
-          metric_name: name,
-          units,
-          date: dateStr,
+          metric_name: toScalar(name),
+          units:       toScalar(units),
+          date:        toScalar(dateStr),
           date_ts,
-          value_min:   entry.Min ?? entry.min ?? null,
-          value_avg:   entry.Avg ?? entry.avg ?? entry.value ?? null,
-          value_max:   entry.Max ?? entry.max ?? null,
-          value_qty:   valueQty,
-          sleep_deep:   sleepDeep,
-          sleep_rem:    sleepRem,
-          sleep_core:   sleepCore,
-          sleep_in_bed: sleepInBed,
-          sleep_start:  sleepStart,
-          sleep_end:    sleepEnd,
-          source: entry.source || null,
-          received_at: now,
+          value_min:   toNum(entry.Min ?? entry.min ?? null),
+          value_avg:   toNum(entry.Avg ?? entry.avg ?? entry.value ?? null),
+          value_max:   toNum(entry.Max ?? entry.max ?? null),
+          value_qty:   toNum(valueQty),
+          sleep_deep:  toNum(sleepDeep),
+          sleep_rem:   toNum(sleepRem),
+          sleep_core:  toNum(sleepCore),
+          sleep_in_bed: toNum(sleepInBed),
+          sleep_start:  toScalar(sleepStart),
+          sleep_end:    toScalar(sleepEnd),
+          source:       toScalar(entry.source) || null,
+          received_at:  now,
         });
         readingsInserted++;
       }
@@ -293,16 +325,16 @@ function ingestPayload(payload, rawSize) {
         }
 
         upsertWorkout.run({
-          workout_type:  workoutType,
-          start_time:    startStr,
-          end_time:      endStr ?? null,
+          workout_type:  toScalar(workoutType),
+          start_time:    toScalar(startStr),
+          end_time:      toScalar(endStr) ?? null,
           start_ts,
           end_ts:        end_ts ?? null,
-          duration,
-          active_energy: entry.activeEnergyBurned ?? entry.activeEnergy ?? entry.totalEnergyBurned ?? null,
-          distance:      entry.distance ?? null,
-          distance_unit: entry.distanceUnit ?? null,
-          source:        entry.source ?? null,
+          duration:      toNum(duration),
+          active_energy: toNum(entry.activeEnergyBurned ?? entry.activeEnergy ?? entry.totalEnergyBurned ?? null),
+          distance:      toNum(entry.distance ?? null),
+          distance_unit: toScalar(entry.distanceUnit) ?? null,
+          source:        toScalar(entry.source) ?? null,
           received_at:   now,
         });
         workoutsInserted++;
