@@ -64,7 +64,7 @@ db.exec(`
     distance_unit TEXT,
     source        TEXT,
     received_at   INTEGER NOT NULL,
-    UNIQUE(workout_type, start_time, source)
+    UNIQUE(workout_type, start_time)
   );
 
   CREATE INDEX IF NOT EXISTS idx_workouts_start ON workouts(start_ts);
@@ -121,6 +121,59 @@ db.exec(`
   WHERE timestamp_ts IS NULL AND timestamp IS NOT NULL
 `);
 
+// Migrate workouts table: change UNIQUE(workout_type, start_time, source) →
+// UNIQUE(workout_type, start_time) so the upsert deduplicates correctly even
+// when source is NULL.  Also deduplicates any existing duplicate rows, keeping
+// the most recently received copy.
+(() => {
+  const info = db.prepare(`PRAGMA table_info(workouts)`).all();
+  if (info.length === 0) return; // table doesn't exist yet, CREATE TABLE above handles it
+
+  // Check the current unique index definition to see if migration is needed
+  const indexes = db.prepare(`PRAGMA index_list(workouts)`).all();
+  const needsMigration = indexes.some(idx => {
+    if (!idx.unique) return false;
+    const cols = db.prepare(`PRAGMA index_info("${idx.name}")`).all().map(c => c.name);
+    return cols.length === 3 && cols.includes('source');
+  });
+
+  if (needsMigration) {
+    console.log('[migrate] Rebuilding workouts table with UNIQUE(workout_type, start_time)…');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS workouts_new (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        workout_type  TEXT    NOT NULL,
+        start_time    TEXT    NOT NULL,
+        end_time      TEXT,
+        start_ts      INTEGER NOT NULL,
+        end_ts        INTEGER,
+        duration      REAL,
+        active_energy REAL,
+        distance      REAL,
+        distance_unit TEXT,
+        source        TEXT,
+        received_at   INTEGER NOT NULL,
+        UNIQUE(workout_type, start_time)
+      );
+
+      -- Copy deduplicated rows (keep the one with the highest received_at per group)
+      INSERT OR IGNORE INTO workouts_new
+        (workout_type, start_time, end_time, start_ts, end_ts,
+         duration, active_energy, distance, distance_unit, source, received_at)
+      SELECT workout_type, start_time, end_time, start_ts, end_ts,
+             duration, active_energy, distance, distance_unit, source, received_at
+      FROM workouts
+      ORDER BY received_at DESC;
+
+      DROP TABLE workouts;
+      ALTER TABLE workouts_new RENAME TO workouts;
+      CREATE INDEX IF NOT EXISTS idx_workouts_start ON workouts(start_ts);
+    `);
+    const beforeCount = db.prepare(`SELECT changes() AS c`).get();
+    console.log('[migrate] Workouts table rebuilt and deduplicated.');
+  }
+})();
+
 // Upsert a single reading row
 const upsertReading = db.prepare(`
   INSERT INTO metric_readings
@@ -160,13 +213,14 @@ const upsertWorkout = db.prepare(`
   VALUES
     (@workout_type, @start_time, @end_time, @start_ts, @end_ts,
      @duration, @active_energy, @distance, @distance_unit, @source, @received_at)
-  ON CONFLICT(workout_type, start_time, source) DO UPDATE SET
+  ON CONFLICT(workout_type, start_time) DO UPDATE SET
     end_time      = excluded.end_time,
     end_ts        = excluded.end_ts,
     duration      = excluded.duration,
     active_energy = excluded.active_energy,
     distance      = excluded.distance,
     distance_unit = excluded.distance_unit,
+    source        = excluded.source,
     received_at   = excluded.received_at
 `);
 
@@ -324,6 +378,23 @@ function ingestPayload(payload, rawSize) {
           duration = end_ts - start_ts;
         }
 
+        // Health Auto Export sends activeEnergy/distance as { qty: N, units: "..." }
+        // objects — unwrap to get the numeric value and units separately.
+        const aeRaw = entry.activeEnergyBurned ?? entry.activeEnergy ?? entry.totalEnergyBurned ?? null;
+        const distRaw = entry.distance ?? null;
+
+        const activeEnergy = (aeRaw && typeof aeRaw === 'object')
+          ? toNum(aeRaw.qty ?? aeRaw.quantity ?? null)
+          : toNum(aeRaw);
+
+        const distVal = (distRaw && typeof distRaw === 'object')
+          ? toNum(distRaw.qty ?? distRaw.quantity ?? null)
+          : toNum(distRaw);
+
+        const distUnit = (distRaw && typeof distRaw === 'object')
+          ? toScalar(distRaw.units ?? distRaw.unit ?? entry.distanceUnit ?? null)
+          : toScalar(entry.distanceUnit ?? null);
+
         upsertWorkout.run({
           workout_type:  toScalar(workoutType),
           start_time:    toScalar(startStr),
@@ -331,9 +402,9 @@ function ingestPayload(payload, rawSize) {
           start_ts,
           end_ts:        end_ts ?? null,
           duration:      toNum(duration),
-          active_energy: toNum(entry.activeEnergyBurned ?? entry.activeEnergy ?? entry.totalEnergyBurned ?? null),
-          distance:      toNum(entry.distance ?? null),
-          distance_unit: toScalar(entry.distanceUnit) ?? null,
+          active_energy: activeEnergy,
+          distance:      distVal,
+          distance_unit: distUnit ?? null,
           source:        toScalar(entry.source) ?? null,
           received_at:   now,
         });
