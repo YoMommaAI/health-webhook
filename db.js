@@ -443,7 +443,8 @@ function getLatest(metricName = null) {
   }
 
   return db.prepare(`
-    SELECT ${cols}
+    SELECT r.metric_name, r.units, r.date, r.value_min, r.value_avg, r.value_max, r.value_qty,
+           r.sleep_deep, r.sleep_rem, r.sleep_core, r.sleep_in_bed, r.sleep_start, r.sleep_end, r.source
     FROM metric_readings r
     INNER JOIN (
       SELECT metric_name, MAX(date_ts) AS max_ts
