@@ -676,4 +676,18 @@ function getCallResults(limit = 50) {
   `).all(cap);
 }
 
-module.exports = { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, getWorkouts, getWorkoutSummary, saveLocation, getLatestLocation, getLocationHistory, saveCallResult, getCallResults };
+/**
+ * Get recent webhook ingestion log entries, newest first.
+ */
+function getWebhookLog(limit = 10) {
+  const cap = Math.min(limit, 50);
+  return db.prepare(`
+    SELECT datetime(received_at, 'unixepoch') AS received_at,
+           payload_size, metric_names, reading_count
+    FROM webhook_log
+    ORDER BY received_at DESC
+    LIMIT ?
+  `).all(cap);
+}
+
+module.exports = { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, getWorkouts, getWorkoutSummary, saveLocation, getLatestLocation, getLocationHistory, saveCallResult, getCallResults, getWebhookLog };

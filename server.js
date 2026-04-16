@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const express = require('express');
-const { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, getWorkouts, getWorkoutSummary, saveLocation, getLatestLocation, getLocationHistory, saveCallResult, getCallResults } = require('./db');
+const { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, getWorkouts, getWorkoutSummary, saveLocation, getLatestLocation, getLocationHistory, saveCallResult, getCallResults, getWebhookLog } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -81,6 +81,8 @@ app.post('/webhook', (req, res) => {
     return res.status(400).json({ error: 'Empty payload' });
   }
 
+  console.log(`[webhook] received payload (${JSON.stringify(raw).length} bytes)`);
+
   // ── Normalize into { data: { metrics: [...], workouts: [...] } } ──────────
   let normalized = raw;
 
@@ -134,6 +136,16 @@ app.get('/health/latest', (req, res) => {
     return res.status(404).json({ error: `No data found for metric: ${metric}` });
   }
   res.json(data);
+});
+
+/**
+ * GET /health/webhook-log
+ * Recent webhook ingestion history — shows when data was last received.
+ * Optional ?limit=N (max 50, default 10).
+ */
+app.get('/health/webhook-log', (req, res) => {
+  const limit = parseInt(req.query.limit, 10) || 10;
+  res.json(getWebhookLog(limit));
 });
 
 /**
