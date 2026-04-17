@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const express = require('express');
-const { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, getWorkouts, getWorkoutSummary, saveLocation, getLatestLocation, getLocationHistory, saveCallResult, getCallResults, getWebhookLog } = require('./db');
+const { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, getWorkouts, getWorkoutSummary, saveLocation, getLatestLocation, getLocationHistory, saveCallResult, getCallResults, getWebhookLog, deleteBySource } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -143,6 +143,20 @@ app.get('/health/latest', (req, res) => {
  * Recent webhook ingestion history — shows when data was last received.
  * Optional ?limit=N (max 50, default 10).
  */
+/**
+ * DELETE /health/cleanup-source?source=Health+Auto+Export+CSV
+ * Remove all metric readings from a specific source (e.g. to clean up duplicate imports).
+ */
+app.delete('/health/cleanup-source', (req, res) => {
+  const { source } = req.query;
+  if (!source) {
+    return res.status(400).json({ error: 'source query parameter is required' });
+  }
+  const deleted = deleteBySource(source);
+  console.log(`[cleanup] deleted ${deleted} readings with source="${source}"`);
+  res.json({ ok: true, deleted });
+});
+
 app.get('/health/webhook-log', (req, res) => {
   const limit = parseInt(req.query.limit, 10) || 10;
   res.json(getWebhookLog(limit));

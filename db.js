@@ -690,4 +690,13 @@ function getWebhookLog(limit = 10) {
   `).all(cap);
 }
 
-module.exports = { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, getWorkouts, getWorkoutSummary, saveLocation, getLatestLocation, getLocationHistory, saveCallResult, getCallResults, getWebhookLog };
+/**
+ * Delete all metric readings from a specific source.
+ * Returns the number of rows deleted.
+ */
+function deleteBySource(source) {
+  const result = db.prepare(`DELETE FROM metric_readings WHERE source = ?`).run(source);
+  return result.changes;
+}
+
+module.exports = { ingestPayload, getLatest, getMetricByDate, getSummary, listMetrics, getWorkouts, getWorkoutSummary, saveLocation, getLatestLocation, getLocationHistory, saveCallResult, getCallResults, getWebhookLog, deleteBySource };
