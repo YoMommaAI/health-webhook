@@ -692,9 +692,14 @@ function getWebhookLog(limit = 10) {
 
 /**
  * Delete all metric readings from a specific source.
+ * Pass source="null" to delete entries where source IS NULL.
  * Returns the number of rows deleted.
  */
 function deleteBySource(source) {
+  if (source === 'null') {
+    const result = db.prepare(`DELETE FROM metric_readings WHERE source IS NULL`).run();
+    return result.changes;
+  }
   const result = db.prepare(`DELETE FROM metric_readings WHERE source = ?`).run(source);
   return result.changes;
 }
